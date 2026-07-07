@@ -34,3 +34,6 @@ AGENTS.md
 .agent
 docs
 docx
+.codegraph/
+cookies.local.json
+*.cookies.json
