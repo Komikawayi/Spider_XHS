@@ -12,7 +12,7 @@ import random
 import urllib.parse
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from loguru import logger
@@ -36,6 +36,8 @@ DEFAULT_NOTE_CONCURRENCY = 4
 DEFAULT_SEARCH_EMPTY_RETRIES = 2
 DEFAULT_SAVE_EXCEL = True
 DEFAULT_USE_POSTGRES = True
+DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT = 150
+DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT = 2500
 # ==============================
 
 
@@ -58,6 +60,46 @@ class CookieAccount:
     cookies: str
     status: str = 'active'
     in_use: bool = False
+    daily_note_limit: int = DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT
+    daily_comment_limit: int = DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT
+    usage_date: str = ''
+    note_ids_today: set = field(default_factory=set)
+    comments_today: int = 0
+    source_path: str = ''
+
+
+def today_usage_date():
+    return datetime.now().date().isoformat()
+
+
+def normalize_usage_fields(record):
+    today = today_usage_date()
+    normalized = dict(record)
+    normalized.setdefault('daily_note_limit', DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT)
+    normalized.setdefault('daily_comment_limit', DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT)
+    if normalized.get('usage_date') != today:
+        normalized['usage_date'] = today
+        normalized['note_ids_today'] = []
+        normalized['comments_today'] = 0
+    else:
+        normalized.setdefault('note_ids_today', [])
+        normalized.setdefault('comments_today', 0)
+    return normalized
+
+
+def cookie_account_from_record(record, index, source_path=''):
+    item = normalize_usage_fields(record)
+    return CookieAccount(
+        str(item.get('name') or f'account_{index + 1}'),
+        item.get('cookies', ''),
+        status=item.get('status', 'active'),
+        daily_note_limit=int(item.get('daily_note_limit') or DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT),
+        daily_comment_limit=int(item.get('daily_comment_limit') or DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT),
+        usage_date=item.get('usage_date') or today_usage_date(),
+        note_ids_today=set(item.get('note_ids_today') or []),
+        comments_today=int(item.get('comments_today') or 0),
+        source_path=source_path or '',
+    )
 
 
 def should_stop_for_message(message):
@@ -78,11 +120,15 @@ def load_cookie_accounts(cookies_file=None, fallback_cookie=None):
     if cookies_file:
         with open(cookies_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        accounts = [
-            CookieAccount(str(item.get('name') or f'account_{index + 1}'), item.get('cookies', ''))
-            for index, item in enumerate(data)
-            if item.get('cookies')
-        ]
+        normalized_data = [normalize_usage_fields(item) for item in data]
+        if normalized_data != data:
+            with open(cookies_file, 'w', encoding='utf-8') as f:
+                json.dump(normalized_data, f, ensure_ascii=False, indent=2)
+                f.write('\n')
+        accounts = []
+        for index, item in enumerate(normalized_data):
+            if item.get('cookies') and item.get('status', 'active') == 'active':
+                accounts.append(cookie_account_from_record(item, index, cookies_file))
         if not accounts:
             raise ValueError(f'Cookie 文件没有可用账号: {cookies_file}')
         return accounts
@@ -99,20 +145,53 @@ class CookieAccountPool:
         self._condition = threading.Condition()
 
     def acquire(self):
+        return self._acquire_matching(
+            lambda account: True,
+            '没有可用账号：所有 Cookie 均已过期或进入冷却',
+        )
+
+    def acquire_for_note(self, note_id):
+        return self._acquire_matching(
+            lambda account: note_id in account.note_ids_today or len(account.note_ids_today) < account.daily_note_limit,
+            '没有可用账号：所有 Cookie 均已过期、进入冷却或达到每日图文额度',
+        )
+
+    def acquire_for_comments(self):
+        return self._acquire_matching(
+            lambda account: account.comments_today < account.daily_comment_limit,
+            '没有可用账号：所有 Cookie 均已过期、进入冷却或达到每日评论额度',
+        )
+
+    def _acquire_matching(self, predicate, exhausted_message):
         with self._condition:
             while True:
                 for account in self.accounts:
-                    if account.status == 'active' and not account.in_use:
+                    if account.status == 'active' and not account.in_use and predicate(account):
                         account.in_use = True
                         return account
-                if any(account.status == 'active' and account.in_use for account in self.accounts):
+                if any(account.status == 'active' and account.in_use and predicate(account) for account in self.accounts):
                     self._condition.wait()
                     continue
-                raise NoAvailableCookieAccounts('没有可用账号：所有 Cookie 均已过期或进入冷却')
+                raise NoAvailableCookieAccounts(exhausted_message)
 
     def report_success(self, account):
         with self._condition:
             account.in_use = False
+            self._persist_usage(account)
+            self._condition.notify_all()
+
+    def report_note_success(self, account, note_id):
+        with self._condition:
+            account.note_ids_today.add(note_id)
+            account.in_use = False
+            self._persist_usage(account)
+            self._condition.notify_all()
+
+    def report_comments_success(self, account, comment_count):
+        with self._condition:
+            account.comments_today += max(0, int(comment_count or 0))
+            account.in_use = False
+            self._persist_usage(account)
             self._condition.notify_all()
 
     def report_failure(self, account, message):
@@ -120,7 +199,35 @@ class CookieAccountPool:
         with self._condition:
             account.status = status
             account.in_use = False
+            self._persist_usage(account)
             self._condition.notify_all()
+
+    def _persist_usage(self, account):
+        if not account.source_path:
+            return
+        path = Path(account.source_path)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception as e:
+            logger.warning(f'账号用量写回失败: {e}')
+            return
+        changed = False
+        for item in data:
+            if item.get('name') == account.name:
+                item['status'] = account.status
+                item['daily_note_limit'] = account.daily_note_limit
+                item['daily_comment_limit'] = account.daily_comment_limit
+                item['usage_date'] = account.usage_date or today_usage_date()
+                item['note_ids_today'] = sorted(account.note_ids_today)
+                item['comments_today'] = account.comments_today
+                changed = True
+                break
+        if changed:
+            tmp_path = path.with_name(f'{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+            tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            os.replace(tmp_path, path)
 
 
 def ensure_cookie_pool(cookie_source):
@@ -375,7 +482,7 @@ def collect_note_result(
     logger.info(f'[{index+1}/{total}] 爬取图文笔记: {note_url}')
 
     while True:
-        account = cookie_pool.acquire()
+        account = cookie_pool.acquire_for_note(note_id)
         try:
             success, msg, note_info = xhs_apis.get_note_info(note_url, account.cookies)
         except Exception as e:
@@ -387,7 +494,7 @@ def collect_note_result(
             logger.error(f'  笔记详情异常: {e}')
             return None
         if success and note_info:
-            cookie_pool.report_success(account)
+            cookie_pool.report_note_success(account, note_id)
             break
         if should_stop_for_message(msg):
             cookie_pool.report_failure(account, msg)
@@ -397,7 +504,11 @@ def collect_note_result(
         logger.warning(f'  笔记详情获取失败: {msg}')
         return None
 
-    raw_note = note_info['data']['items'][0]
+    items = (note_info.get('data') or {}).get('items') or []
+    if not items:
+        logger.warning(f'  笔记详情响应缺少 items，跳过: {note_id}')
+        return None
+    raw_note = items[0]
     raw_note['url'] = note_url
     note_data = handle_note_info(raw_note)
     if note_data.get('note_type') != '图集':
@@ -424,7 +535,7 @@ def collect_note_result(
         collected_count = int(note.get('_comments_collected_count') or 0)
 
     while collected_count < max_comments_per_note:
-        account = cookie_pool.acquire()
+        account = cookie_pool.acquire_for_comments()
         try:
             page_comments, next_cursor, has_more = fetch_comment_page(
                 xhs_apis, note_url, account.cookies, cursor
@@ -447,15 +558,16 @@ def collect_note_result(
                         note_id, 'partial', collected_count, max_comments_per_note, cursor, True
                     )
             break
-        cookie_pool.report_success(account)
 
         remaining = max_comments_per_note - collected_count
+        saved_comment_count = min(len(page_comments), remaining)
         for comment in page_comments[:remaining]:
             comment_data = parse_comment(comment, note_id, note_title)
             comment_rows.append((comment_data, comment))
             if storage:
                 with storage_lock:
                     storage.upsert_comment(comment_data, note_id, note_title, raw=comment)
+        cookie_pool.report_comments_success(account, saved_comment_count)
 
         if storage:
             with storage_lock:

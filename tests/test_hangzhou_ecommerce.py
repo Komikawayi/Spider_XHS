@@ -130,6 +130,11 @@ class ResumeCommentApi(SlowNoteApi):
         return True, "成功", {"data": {"comments": comments, "cursor": "resume-cursor", "has_more": True}}
 
 
+class MissingItemsNoteApi(SlowNoteApi):
+    def get_note_info(self, note_url, cookies_str):
+        return True, "成功", {"data": {}}
+
+
 class FakeProgressStorage:
     def __init__(self, progress=None):
         self.progress = progress or {}
@@ -313,6 +318,54 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
         self.assertEqual([account.name for account in accounts], ["a1", "a2"])
         self.assertEqual([account.cookies for account in accounts], ["cookie-1", "cookie-2"])
 
+    def test_load_cookie_accounts_skips_inactive_json_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.local.json"
+            path.write_text(json.dumps([
+                {"name": "active", "cookies": "cookie-1", "status": "active"},
+                {"name": "legacy", "cookies": "cookie-2"},
+                {"name": "expired", "cookies": "cookie-3", "status": "expired"},
+                {"name": "disabled", "cookies": "cookie-4", "status": "disabled"},
+            ]), encoding="utf-8")
+
+            accounts = hz.load_cookie_accounts(str(path), fallback_cookie="fallback")
+
+        self.assertEqual([account.name for account in accounts], ["active", "legacy"])
+        self.assertEqual([account.cookies for account in accounts], ["cookie-1", "cookie-2"])
+
+    def test_load_cookie_accounts_keeps_daily_usage_and_resets_old_day(self):
+        today = hz.today_usage_date()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cookies.local.json"
+            path.write_text(json.dumps([
+                {
+                    "name": "today",
+                    "cookies": "cookie-1",
+                    "daily_note_limit": 2,
+                    "daily_comment_limit": 5,
+                    "usage_date": today,
+                    "note_ids_today": ["n1"],
+                    "comments_today": 3,
+                },
+                {
+                    "name": "old",
+                    "cookies": "cookie-2",
+                    "usage_date": "2000-01-01",
+                    "note_ids_today": ["old-note"],
+                    "comments_today": 99,
+                },
+            ]), encoding="utf-8")
+
+            accounts = hz.load_cookie_accounts(str(path), fallback_cookie="fallback")
+
+        self.assertEqual(accounts[0].daily_note_limit, 2)
+        self.assertEqual(accounts[0].daily_comment_limit, 5)
+        self.assertEqual(accounts[0].note_ids_today, {"n1"})
+        self.assertEqual(accounts[0].comments_today, 3)
+        self.assertEqual(accounts[1].usage_date, today)
+        self.assertEqual(accounts[1].note_ids_today, set())
+        self.assertEqual(accounts[1].comments_today, 0)
+
     def test_load_cookie_accounts_falls_back_to_env_cookie(self):
         accounts = hz.load_cookie_accounts(None, fallback_cookie="single-cookie")
 
@@ -335,6 +388,43 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
             pool.acquire()
         self.assertEqual(first.status, "expired")
         self.assertEqual(second.status, "cooling")
+
+    def test_cookie_pool_skips_accounts_that_reach_daily_note_limit(self):
+        pool = hz.CookieAccountPool([
+            hz.CookieAccount("a1", "cookie-1", daily_note_limit=1),
+            hz.CookieAccount("a2", "cookie-2", daily_note_limit=1),
+        ])
+
+        first = pool.acquire_for_note("n1")
+        pool.report_note_success(first, "n1")
+        second = pool.acquire_for_note("n2")
+
+        self.assertEqual(first.name, "a1")
+        self.assertEqual(second.name, "a2")
+        pool.report_success(second)
+
+    def test_cookie_pool_does_not_count_same_note_twice(self):
+        account = hz.CookieAccount("a1", "cookie-1", daily_note_limit=1)
+        pool = hz.CookieAccountPool([account])
+
+        first = pool.acquire_for_note("n1")
+        pool.report_note_success(first, "n1")
+        second = pool.acquire_for_note("n1")
+        pool.report_note_success(second, "n1")
+
+        self.assertEqual(account.note_ids_today, {"n1"})
+
+    def test_cookie_pool_skips_accounts_that_reach_daily_comment_limit(self):
+        pool = hz.CookieAccountPool([
+            hz.CookieAccount("a1", "cookie-1", daily_comment_limit=2, comments_today=2),
+            hz.CookieAccount("a2", "cookie-2", daily_comment_limit=2),
+        ])
+
+        account = pool.acquire_for_comments()
+        pool.report_comments_success(account, 1)
+
+        self.assertEqual(account.name, "a2")
+        self.assertEqual(account.comments_today, 1)
 
     def test_filter_notes_skips_done_notes_when_platform_has_no_more_comments(self):
         notes = [
@@ -431,6 +521,20 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
         self.assertEqual(api.comment_cursors, ["resume-cursor"])
         self.assertEqual([comment["comment_id"] for comment in storage.comments], ["c3", "c4"])
         self.assertEqual(storage.progress["n1"]["comments_crawl_status"], "done")
+
+    def test_collect_note_result_skips_detail_response_without_items(self):
+        pool = hz.CookieAccountPool([hz.CookieAccount("a1", "cookie-1")])
+        note = {"id": "n-missing", "model_type": "note", "note_card": {"type": "normal"}}
+
+        result = hz.collect_note_result(
+            0, 1, note, MissingItemsNoteApi(), pool,
+            max_comments_per_note=0,
+            delay_seconds=0,
+            base_path={"media": "media"},
+            download_media_flag=False,
+        )
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
