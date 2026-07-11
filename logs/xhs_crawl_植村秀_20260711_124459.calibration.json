@@ -1,0 +1,85 @@
+{
+  "metadata": {
+    "query": "植村秀",
+    "started_at": "2026-07-11T12:44:59.623863",
+    "finished_at": "2026-07-11T12:45:09.840048",
+    "status": "done",
+    "error": null,
+    "task_id": null,
+    "note_count": 20,
+    "comment_count": 200,
+    "target_notes": 20,
+    "target_comments": 200,
+    "stop_reason": "note_target_reached+comment_target_reached",
+    "requested_note_concurrency": 20,
+    "comment_concurrency": 12,
+    "active_account_capacity": 8,
+    "sign_concurrency": 12,
+    "account_names": [
+      "account_10"
+    ],
+    "usage_before": {
+      "account_10": {
+        "status": "active",
+        "notes_used": 35,
+        "comments_used": 618,
+        "max_concurrency": 8
+      }
+    },
+    "usage_after": {
+      "account_10": {
+        "status": "active",
+        "notes_used": 35,
+        "comments_used": 818,
+        "max_concurrency": 8
+      }
+    },
+    "validation_before": {
+      "account": "account_10",
+      "success": true,
+      "message": "成功",
+      "user_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ],
+      "search_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ]
+    },
+    "validation_after": {
+      "account": "account_10",
+      "success": true,
+      "message": "成功",
+      "user_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ],
+      "search_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ]
+    },
+    "calibration_mode": true,
+    "metrics_file": "logs\\xhs_crawl_植村秀_20260711_124459.metrics.json"
+  },
+  "http": {
+    "successes": 81,
+    "failures": 0,
+    "error_rate": 0.0,
+    "endpoint_p95_seconds": 0.221609
+  },
+  "threshold_result": {
+    "passed": true,
+    "next_note_target": 70,
+    "next_comment_target": 700
+  }
+}

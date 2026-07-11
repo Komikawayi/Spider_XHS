@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-07-11T12:50:29.367460",
+  "account_count": 1,
+  "accounts": [
+    {
+      "account": "account_10",
+      "concurrency": 8,
+      "target_notes": 20,
+      "actual_notes": 20,
+      "target_comments": 200,
+      "actual_comments": 200,
+      "passed": true,
+      "capacity_qualified": false,
+      "http_error_rate": 0.0,
+      "validation_after": true,
+      "safe_note_limit": 0,
+      "safe_comment_limit": 0,
+      "recommended_cooldown_minutes": 30,
+      "source": "logs\\xhs_crawl_植村秀_20260711_124459.metrics.json"
+    }
+  ],
+  "recommended_concurrency": 0,
+  "aggregate_safe_note_capacity": 0,
+  "aggregate_safe_comment_capacity": 0,
+  "next_action": "run_first_200_note_calibration"
+}

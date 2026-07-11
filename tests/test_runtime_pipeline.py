@@ -71,6 +71,22 @@ class RuntimePipelineTests(unittest.TestCase):
         self.assertEqual(payload["counters"]["notes.completed"], 2)
         self.assertEqual(payload["metadata"]["status"], "done")
 
+    def test_metrics_records_quantiles_rates_gauges_and_markers(self):
+        metrics = CrawlMetrics()
+        metrics.record_duration("http.feed", 0.1)
+        metrics.record_duration("http.feed", 0.3)
+        metrics.mark_event("http.requests", 2)
+        metrics.change_gauge("workers.detail.active", 1)
+        metrics.mark("notes.50", {"http_requests": 80})
+        metrics.change_gauge("workers.detail.active", -1)
+
+        snapshot = metrics.snapshot()
+
+        self.assertEqual(snapshot["timings"]["http.feed"]["p95_seconds"], 0.3)
+        self.assertEqual(snapshot["rates"]["http.requests"]["total"], 2)
+        self.assertEqual(snapshot["gauges"]["workers.detail.active"]["max"], 1)
+        self.assertEqual(snapshot["markers"]["notes.50"]["http_requests"], 80)
+
     def test_signing_executor_limits_parallel_calls(self):
         active = 0
         max_active = 0

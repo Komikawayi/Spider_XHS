@@ -56,10 +56,48 @@ class AsyncXHSApi:
                 ),
                 cookie_jar=aiohttp.DummyCookieJar(),
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                trace_configs=[self._build_trace_config()],
             )
         if self._metrics:
             self._metrics.increment("http.sessions_created")
         return self._session
+
+    def _build_trace_config(self):
+        trace = aiohttp.TraceConfig()
+
+        async def start(ctx, name):
+            setattr(ctx, name, time.monotonic())
+
+        async def finish(ctx, name, metric):
+            started = getattr(ctx, name, None)
+            if started is not None and self._metrics:
+                self._metrics.record_duration(metric, time.monotonic() - started)
+
+        async def queued_start(_session, ctx, _params):
+            await start(ctx, "queued_at")
+
+        async def queued_end(_session, ctx, _params):
+            await finish(ctx, "queued_at", "http.connection_queue_wait")
+
+        async def connect_start(_session, ctx, _params):
+            await start(ctx, "connect_at")
+
+        async def connect_end(_session, ctx, _params):
+            await finish(ctx, "connect_at", "http.connection_create")
+
+        async def dns_start(_session, ctx, _params):
+            await start(ctx, "dns_at")
+
+        async def dns_end(_session, ctx, _params):
+            await finish(ctx, "dns_at", "http.dns")
+
+        trace.on_connection_queued_start.append(queued_start)
+        trace.on_connection_queued_end.append(queued_end)
+        trace.on_connection_create_start.append(connect_start)
+        trace.on_connection_create_end.append(connect_end)
+        trace.on_dns_resolvehost_start.append(dns_start)
+        trace.on_dns_resolvehost_end.append(dns_end)
+        return trace
 
     async def close(self):
         if self._session is not None:
@@ -70,10 +108,16 @@ class AsyncXHSApi:
         session = await self._get_session()
         started_at = time.monotonic()
         metric_name = "http." + operation.strip("/").replace("/", ".")
+        if self._metrics:
+            self._metrics.increment("http.requests.total")
+            self._metrics.mark_event("http.requests")
+            self._metrics.mark_event(metric_name + ".requests")
         try:
             async with session.request(method, self.base_url + api, **kwargs) as response:
                 payload = await response.json(content_type=None)
                 ok = 200 <= response.status < 400
+                if self._metrics:
+                    self._metrics.increment(f"http.status.{response.status}")
         except Exception:
             if self._metrics:
                 self._metrics.record_duration(
@@ -86,7 +130,25 @@ class AsyncXHSApi:
             )
         return payload
 
+    async def get_user_me(self, cookies_str, proxies=None):
+        api = "/api/sns/web/v2/user/me"
+        try:
+            headers, cookies, _ = await self._request_params(cookies_str, api, "", "GET")
+            response = await self._request_json(
+                "GET", api, api, headers=headers, cookies=cookies,
+                proxy=self._proxy(proxies),
+            )
+            success, message = _success_message(response)
+        except Exception as error:
+            logger.exception(f"XHS async user/me request failed: {error}")
+            return False, str(error), None
+        return success, message, response
+
     async def _request_params(self, cookies_str, api, data="", method="POST"):
+        if self._signer and hasattr(self._signer, "submit_request_params"):
+            return await asyncio.wrap_future(
+                self._signer.submit_request_params(cookies_str, api, data, method)
+            )
         generator = (
             self._signer.generate_request_params
             if self._signer else generate_request_params
@@ -94,6 +156,8 @@ class AsyncXHSApi:
         return await asyncio.to_thread(generator, cookies_str, api, data, method)
 
     async def _x_rap_param(self, api, data):
+        if self._signer and hasattr(self._signer, "submit_x_rap_param"):
+            return await asyncio.wrap_future(self._signer.submit_x_rap_param(api, data))
         generator = self._signer.generate_x_rap_param if self._signer else generate_x_rap_param
         return await asyncio.to_thread(generator, api, data)
 

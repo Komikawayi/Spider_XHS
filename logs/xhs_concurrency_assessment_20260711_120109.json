@@ -1,0 +1,50 @@
+{
+  "recorded_at": "2026-07-11T12:02:17.177060",
+  "hardware": {
+    "logical_processors": 20
+  },
+  "validated_profile": {
+    "note_concurrency": 20,
+    "account_concurrency": 20,
+    "sign_concurrency": 12
+  },
+  "local_signing_benchmark": [
+    {
+      "workers": 4,
+      "throughput_per_second": 8.58
+    },
+    {
+      "workers": 8,
+      "throughput_per_second": 10.87
+    },
+    {
+      "workers": 10,
+      "throughput_per_second": 10.72
+    },
+    {
+      "workers": 12,
+      "throughput_per_second": 13.4
+    },
+    {
+      "workers": 16,
+      "throughput_per_second": 13.16
+    },
+    {
+      "workers": 20,
+      "throughput_per_second": 12.86
+    },
+    {
+      "workers": 50,
+      "throughput_per_second": 13.07,
+      "p95_task_seconds": 4.011
+    }
+  ],
+  "live_async_regression": {
+    "metrics_file": "logs/xhs_crawl_植村秀_20260711_120109.metrics.json",
+    "elapsed_seconds": 2.691071,
+    "note_count": 6,
+    "comment_count": 79,
+    "status": "done"
+  },
+  "conclusion": "使用20个采集槽、20个账号容量与12个签名线程；50个签名线程没有提高吞吐且显著增加尾延迟。"
+}

@@ -24,21 +24,45 @@ class SigningExecutor:
         self._request_params_fn = request_params_fn
         self._rap_param_fn = rap_param_fn
 
-    def _run(self, func, *args):
-        started_at = time.monotonic()
-        try:
-            result = self._executor.submit(func, *args).result()
-        except Exception:
+    def _submit(self, func, *args):
+        submitted_at = time.monotonic()
+
+        def run():
+            started_at = time.monotonic()
             if self._metrics:
                 self._metrics.record_duration(
-                    "signing", time.monotonic() - started_at, success=False
+                    "signing.queue_wait", started_at - submitted_at
                 )
-            raise
-        if self._metrics:
-            self._metrics.record_duration(
-                "signing", time.monotonic() - started_at, success=True
-            )
-        return result
+            try:
+                result = func(*args)
+            except Exception:
+                if self._metrics:
+                    self._metrics.record_duration(
+                        "signing.execute", time.monotonic() - started_at, success=False
+                    )
+                    self._metrics.record_duration(
+                        "signing", time.monotonic() - submitted_at, success=False
+                    )
+                raise
+            if self._metrics:
+                self._metrics.record_duration(
+                    "signing.execute", time.monotonic() - started_at, success=True
+                )
+                self._metrics.record_duration(
+                    "signing", time.monotonic() - submitted_at, success=True
+                )
+            return result
+
+        return self._executor.submit(run)
+
+    def _run(self, func, *args):
+        return self._submit(func, *args).result()
+
+    def submit_request_params(self, cookies_str, api, data="", method="POST"):
+        return self._submit(self._request_params_fn, cookies_str, api, data, method)
+
+    def submit_x_rap_param(self, api, data, app_id=None):
+        return self._submit(self._rap_param_fn, api, data, app_id)
 
     def generate_request_params(self, cookies_str, api, data="", method="POST"):
         return self._run(self._request_params_fn, cookies_str, api, data, method)

@@ -1,0 +1,261 @@
+{
+  "elapsed_seconds": 10.193555,
+  "counters": {
+    "signing.execute.success": 126,
+    "signing.success": 126,
+    "http.sessions_created": 1,
+    "http.status.200": 81,
+    "http.api.sns.web.v2.user.me.success": 2,
+    "http.api.sns.web.v1.search.notes.success": 6,
+    "validation.before.success": 1,
+    "account.account_10.acquired": 77,
+    "account.wait.success": 77,
+    "search.pages": 4,
+    "search.candidates.raw": 88,
+    "search.candidates.unique": 80,
+    "search.candidates.filtered": 8,
+    "notes.started": 39,
+    "http.api.sns.web.v1.feed.success": 39,
+    "account.account_10.notes": 20,
+    "notes.completed": 20,
+    "http.api.sns.web.v2.comment.page.success": 34,
+    "account.account_10.comments": 200,
+    "comments.pages": 34,
+    "comments.fetched": 275,
+    "comments.saved": 200,
+    "comments.requeued": 14,
+    "validation.after.success": 1
+  },
+  "timings": {
+    "signing.queue_wait": {
+      "count": 126,
+      "total_seconds": 0.025332,
+      "average_seconds": 0.000201,
+      "min_seconds": 3.9e-05,
+      "max_seconds": 0.000841,
+      "p50_seconds": 0.000145,
+      "p95_seconds": 0.000525,
+      "p99_seconds": 0.000783
+    },
+    "signing.execute": {
+      "count": 126,
+      "total_seconds": 41.111761,
+      "average_seconds": 0.326284,
+      "min_seconds": 0.186378,
+      "max_seconds": 0.40623,
+      "p50_seconds": 0.331305,
+      "p95_seconds": 0.37279,
+      "p99_seconds": 0.390236
+    },
+    "signing": {
+      "count": 126,
+      "total_seconds": 41.13855,
+      "average_seconds": 0.326496,
+      "min_seconds": 0.186432,
+      "max_seconds": 0.406688,
+      "p50_seconds": 0.331583,
+      "p95_seconds": 0.372867,
+      "p99_seconds": 0.390616
+    },
+    "http.api.sns.web.v2.user.me": {
+      "count": 2,
+      "total_seconds": 0.250311,
+      "average_seconds": 0.125155,
+      "min_seconds": 0.104096,
+      "max_seconds": 0.146215,
+      "p50_seconds": 0.104096,
+      "p95_seconds": 0.104096,
+      "p99_seconds": 0.104096
+    },
+    "http.api.sns.web.v1.search.notes": {
+      "count": 6,
+      "total_seconds": 2.768339,
+      "average_seconds": 0.46139,
+      "min_seconds": 0.224901,
+      "max_seconds": 0.665372,
+      "p50_seconds": 0.329397,
+      "p95_seconds": 0.653092,
+      "p99_seconds": 0.653092
+    },
+    "account.wait": {
+      "count": 77,
+      "total_seconds": 94.166038,
+      "average_seconds": 1.222936,
+      "min_seconds": 6e-06,
+      "max_seconds": 2.336811,
+      "p50_seconds": 1.575838,
+      "p95_seconds": 2.064802,
+      "p99_seconds": 2.102074
+    },
+    "queue.note.put_wait": {
+      "count": 60,
+      "total_seconds": 0.000104,
+      "average_seconds": 2e-06,
+      "min_seconds": 1e-06,
+      "max_seconds": 1.2e-05,
+      "p50_seconds": 1e-06,
+      "p95_seconds": 4e-06,
+      "p99_seconds": 9e-06
+    },
+    "queue.note.get_wait": {
+      "count": 80,
+      "total_seconds": 42.411855,
+      "average_seconds": 0.530148,
+      "min_seconds": 1e-06,
+      "max_seconds": 2.727642,
+      "p50_seconds": 0.123327,
+      "p95_seconds": 1.592713,
+      "p99_seconds": 1.939125
+    },
+    "http.api.sns.web.v1.feed": {
+      "count": 39,
+      "total_seconds": 4.372169,
+      "average_seconds": 0.112107,
+      "min_seconds": 0.08165,
+      "max_seconds": 0.203838,
+      "p50_seconds": 0.096136,
+      "p95_seconds": 0.201205,
+      "p99_seconds": 0.202942
+    },
+    "queue.comment.put_wait": {
+      "count": 34,
+      "total_seconds": 0.000234,
+      "average_seconds": 7e-06,
+      "min_seconds": 4e-06,
+      "max_seconds": 1.3e-05,
+      "p50_seconds": 6e-06,
+      "p95_seconds": 1.1e-05,
+      "p99_seconds": 1.2e-05
+    },
+    "queue.comment.get_wait": {
+      "count": 46,
+      "total_seconds": 29.686156,
+      "average_seconds": 0.645351,
+      "min_seconds": 2e-06,
+      "max_seconds": 2.745804,
+      "p50_seconds": 0.000242,
+      "p95_seconds": 2.718281,
+      "p99_seconds": 2.743598
+    },
+    "http.api.sns.web.v2.comment.page": {
+      "count": 34,
+      "total_seconds": 4.468418,
+      "average_seconds": 0.131424,
+      "min_seconds": 0.08687,
+      "max_seconds": 0.281715,
+      "p50_seconds": 0.11459,
+      "p95_seconds": 0.221609,
+      "p99_seconds": 0.25257
+    }
+  },
+  "values": {
+    "resource.process_cpu_percent": {
+      "count": 8,
+      "average": 43.3375,
+      "min": 10.6,
+      "max": 156.6,
+      "p50": 30.3,
+      "p95": 35.5,
+      "p99": 35.5
+    },
+    "resource.node_cpu_percent": {
+      "count": 8,
+      "average": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0
+    },
+    "resource.rss_mb": {
+      "count": 8,
+      "average": 90.898926,
+      "min": 82.824219,
+      "max": 96.726562,
+      "p50": 90.960938,
+      "p95": 94.730469,
+      "p99": 94.730469
+    }
+  },
+  "max_values": {
+    "scheduler.async_note_workers": 20.0,
+    "scheduler.async_comment_workers": 12.0,
+    "account.account_10.active": 8.0,
+    "resource.threads": 59.0,
+    "resource.node_processes": 8.0,
+    "queue.note.depth": 26.0,
+    "queue.comment.depth": 8.0
+  },
+  "metadata": {
+    "query": "植村秀",
+    "started_at": "2026-07-11T12:44:59.623863",
+    "finished_at": "2026-07-11T12:45:09.840048",
+    "status": "done",
+    "error": null,
+    "task_id": null,
+    "note_count": 20,
+    "comment_count": 200,
+    "target_notes": 20,
+    "target_comments": 200,
+    "stop_reason": "note_target_reached+comment_target_reached",
+    "requested_note_concurrency": 20,
+    "comment_concurrency": 12,
+    "active_account_capacity": 8,
+    "sign_concurrency": 12,
+    "account_names": [
+      "account_10"
+    ],
+    "usage_before": {
+      "account_10": {
+        "status": "active",
+        "notes_used": 35,
+        "comments_used": 618,
+        "max_concurrency": 8
+      }
+    },
+    "usage_after": {
+      "account_10": {
+        "status": "active",
+        "notes_used": 35,
+        "comments_used": 818,
+        "max_concurrency": 8
+      }
+    },
+    "validation_before": {
+      "account": "account_10",
+      "success": true,
+      "message": "成功",
+      "user_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ],
+      "search_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ]
+    },
+    "validation_after": {
+      "account": "account_10",
+      "success": true,
+      "message": "成功",
+      "user_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ],
+      "search_response_keys": [
+        "code",
+        "data",
+        "msg",
+        "success"
+      ]
+    },
+    "calibration_mode": true,
+    "metrics_file": "logs\\xhs_crawl_植村秀_20260711_124459.metrics.json"
+  }
+}
