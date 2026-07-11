@@ -2,6 +2,7 @@ import json
 import math
 import os
 import random
+import threading
 import time
 from urllib.parse import urlencode
 
@@ -17,12 +18,14 @@ def _compile_static_js(filename):
 
 
 _JS_CACHE = {}
+_JS_CACHE_LOCK = threading.Lock()
 
 
 def _get_static_js(filename):
-    if filename not in _JS_CACHE:
-        _JS_CACHE[filename] = _compile_static_js(filename)
-    return _JS_CACHE[filename]
+    with _JS_CACHE_LOCK:
+        if filename not in _JS_CACHE:
+            _JS_CACHE[filename] = _compile_static_js(filename)
+        return _JS_CACHE[filename]
 
 def generate_x_b3_traceid(len=16):
     x_b3_traceid = ""

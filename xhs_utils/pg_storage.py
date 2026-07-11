@@ -210,6 +210,7 @@ class PostgresStorage:
 
     def init_schema(self):
         with self.conn.cursor() as cur:
+            cur.execute("CREATE SCHEMA IF NOT EXISTS public")
             cur.execute(SCHEMA_SQL)
 
     def start_task(self, keyword, config):
@@ -236,9 +237,17 @@ class PostgresStorage:
             )
 
     def upsert_note(self, note, keyword="", raw=None):
-        row = _adapt_json_fields(normalize_note_row(note, keyword, raw), ["image_list", "tags", "raw_json"])
+        self.bulk_upsert_notes([(note, keyword, raw)])
+
+    def bulk_upsert_notes(self, notes):
+        rows = [
+            _adapt_json_fields(normalize_note_row(note, keyword, raw), ["image_list", "tags", "raw_json"])
+            for note, keyword, raw in notes
+        ]
+        if not rows:
+            return
         with self.conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO xhs_notes (
                     note_id, note_url, note_type, user_id, home_url, nickname,
@@ -275,18 +284,25 @@ class PostgresStorage:
                     raw_json=EXCLUDED.raw_json,
                     updated_at=now()
                 """,
-                row,
+                rows,
             )
 
     def upsert_comment(self, comment, note_id, note_title="", parent_comment_id=None, raw=None):
-        row = _adapt_json_fields(
-            normalize_comment_row(comment, note_id, note_title, parent_comment_id, raw),
-            ["raw_json"],
-        )
-        if not row["comment_id"]:
+        self.bulk_upsert_comments([(comment, note_id, note_title, parent_comment_id, raw)])
+
+    def bulk_upsert_comments(self, comments):
+        rows = []
+        for comment, note_id, note_title, parent_comment_id, raw in comments:
+            row = _adapt_json_fields(
+                normalize_comment_row(comment, note_id, note_title, parent_comment_id, raw),
+                ["raw_json"],
+            )
+            if row["comment_id"]:
+                rows.append(row)
+        if not rows:
             return
         with self.conn.cursor() as cur:
-            cur.execute(
+            cur.executemany(
                 """
                 INSERT INTO xhs_comments (
                     comment_id, note_id, parent_comment_id, note_title, content,
@@ -313,17 +329,44 @@ class PostgresStorage:
                     raw_json=EXCLUDED.raw_json,
                     updated_at=now()
                 """,
-                row,
+                rows,
             )
 
     def count_comments(self, note_id):
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM xhs_comments WHERE note_id=%s", (note_id,))
-            return cur.fetchone()[0]
+        return self.get_comment_counts_by_note_ids([note_id]).get(note_id, 0)
 
-    def update_comment_progress(self, note_id, status, collected_count, target_count, next_cursor, has_more):
+    def get_comment_counts_by_note_ids(self, note_ids):
+        note_ids = list(dict.fromkeys(note_ids))
+        if not note_ids:
+            return {}
+        placeholders = ", ".join(["%s"] * len(note_ids))
         with self.conn.cursor() as cur:
             cur.execute(
+                f"""
+                SELECT note_id, COUNT(*)
+                FROM xhs_comments
+                WHERE note_id IN ({placeholders})
+                GROUP BY note_id
+                """,
+                note_ids,
+            )
+            counts = {note_id: count for note_id, count in cur.fetchall()}
+        return {note_id: counts.get(note_id, 0) for note_id in note_ids}
+
+    def update_comment_progress(self, note_id, status, collected_count, target_count, next_cursor, has_more):
+        self.bulk_update_comment_progress([
+            (note_id, status, collected_count, target_count, next_cursor, has_more),
+        ])
+
+    def bulk_update_comment_progress(self, progress_rows):
+        rows = [
+            (note_id, status, collected_count, target_count, next_cursor or "", bool(has_more))
+            for note_id, status, collected_count, target_count, next_cursor, has_more in progress_rows
+        ]
+        if not rows:
+            return
+        with self.conn.cursor() as cur:
+            cur.executemany(
                 """
                 UPDATE xhs_notes
                 SET comments_crawl_status=%s,
@@ -335,8 +378,67 @@ class PostgresStorage:
                     updated_at=now()
                 WHERE note_id=%s
                 """,
-                (status, collected_count, target_count, next_cursor or "", bool(has_more), note_id),
+                [
+                    (status, collected_count, target_count, next_cursor, has_more, note_id)
+                    for note_id, status, collected_count, target_count, next_cursor, has_more in rows
+                ],
             )
+
+    def write_batch(self, note_operations, comment_page_operations, progress_operations):
+        """在单个事务中写入笔记、评论页和评论进度。"""
+        note_rows = [
+            (item["note"], item.get("keyword", ""), item.get("raw"))
+            for item in note_operations
+        ]
+        comment_rows = []
+        for page in comment_page_operations:
+            comment_rows.extend(
+                (comment, page["note_id"], page["note_title"], None, raw)
+                for comment, raw in page["comments"]
+            )
+
+        with self.conn.transaction():
+            self.bulk_upsert_notes(note_rows)
+            self.bulk_upsert_comments(comment_rows)
+            counts = self.get_comment_counts_by_note_ids(
+                [page["note_id"] for page in comment_page_operations]
+            )
+
+            progress_rows = []
+            page_results = {}
+            for page in comment_page_operations:
+                note_id = page["note_id"]
+                collected_count = counts.get(note_id, 0)
+                is_done = (
+                    collected_count >= page["target_count"]
+                    or not page["has_more"]
+                    or not page["next_cursor"]
+                )
+                progress_rows.append((
+                    note_id,
+                    "done" if is_done else "partial",
+                    collected_count,
+                    page["target_count"],
+                    page["next_cursor"] if page["has_more"] and page["next_cursor"] else "",
+                    page["has_more"],
+                ))
+                page_results[note_id] = {
+                    "collected_count": collected_count,
+                    "is_done": is_done,
+                }
+            progress_rows.extend(
+                (
+                    item["note_id"],
+                    item["status"],
+                    item["collected_count"],
+                    item["target_count"],
+                    item["next_cursor"],
+                    item["has_more"],
+                )
+                for item in progress_operations
+            )
+            self.bulk_update_comment_progress(progress_rows)
+        return page_results
 
     def get_comment_progress_by_note_ids(self, note_ids):
         if not note_ids:

@@ -1,0 +1,67 @@
+{
+  "elapsed_seconds": 22.489038,
+  "counters": {
+    "account.wait.success": 25,
+    "signing.success": 35,
+    "http.sessions_created": 3,
+    "http.api.sns.web.v1.search.notes.success": 1,
+    "notes.started": 9,
+    "http.api.sns.web.v1.feed.success": 9,
+    "database.batches": 23,
+    "database.rows": 119,
+    "database.write_batch.success": 23,
+    "http.api.sns.web.v2.comment.page.success": 15,
+    "comments.fetched": 110,
+    "notes.completed": 9
+  },
+  "timings": {
+    "account.wait": {
+      "count": 25,
+      "total_seconds": 0.00017,
+      "average_seconds": 7e-06
+    },
+    "signing": {
+      "count": 35,
+      "total_seconds": 7.894747,
+      "average_seconds": 0.225564
+    },
+    "http.api.sns.web.v1.search.notes": {
+      "count": 1,
+      "total_seconds": 0.985468,
+      "average_seconds": 0.985468
+    },
+    "http.api.sns.web.v1.feed": {
+      "count": 9,
+      "total_seconds": 1.764634,
+      "average_seconds": 0.19607
+    },
+    "database.write_batch": {
+      "count": 23,
+      "total_seconds": 0.164671,
+      "average_seconds": 0.00716
+    },
+    "http.api.sns.web.v2.comment.page": {
+      "count": 15,
+      "total_seconds": 1.747994,
+      "average_seconds": 0.116533
+    }
+  },
+  "max_values": {
+    "scheduler.note_workers": 2.0,
+    "database.queue_depth": 1.0
+  },
+  "metadata": {
+    "query": "植村秀",
+    "started_at": "2026-07-11T09:56:52.187239",
+    "finished_at": "2026-07-11T09:57:14.696814",
+    "status": "done",
+    "error": null,
+    "note_count": 9,
+    "comment_count": 110,
+    "requested_note_concurrency": 2,
+    "active_account_capacity": 2,
+    "sign_concurrency": 2,
+    "db_batch_size": 100,
+    "db_flush_seconds": 0.05
+  }
+}

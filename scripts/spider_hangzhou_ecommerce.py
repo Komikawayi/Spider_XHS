@@ -11,7 +11,7 @@ import argparse
 import random
 import urllib.parse
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apis.xhs_pc_apis import XHS_Apis
 from xhs_utils.common_util import init
+from xhs_utils.crawl_metrics import CrawlMetrics
 from xhs_utils.data_util import handle_note_info, download_note, save_to_xlsx
 from xhs_utils.pg_storage import PostgresStorage
+from xhs_utils.signing_executor import SigningExecutor
+from xhs_utils.storage_writer import StorageWriter
 
 
 # ========== 常用采集配置 ==========
@@ -32,13 +35,17 @@ DEFAULT_QUERY = '植村秀'
 DEFAULT_REQUIRE_NUM = 1000
 DEFAULT_MAX_COMMENTS_PER_NOTE = 500
 DEFAULT_DELAY_SECONDS = 1
-DEFAULT_NOTE_CONCURRENCY = 8
+DEFAULT_NOTE_CONCURRENCY = 10
 DEFAULT_SEARCH_EMPTY_RETRIES = 2
 DEFAULT_SAVE_EXCEL = True
 DEFAULT_USE_POSTGRES = True
 DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT = 150
 DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT = 2500
-DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT = 2
+DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT = 10
+DEFAULT_SIGN_CONCURRENCY = 4
+DEFAULT_DB_BATCH_SIZE = 100
+DEFAULT_DB_FLUSH_SECONDS = 0.05
+DEFAULT_TASK_PREFETCH_MULTIPLIER = 2
 DEFAULT_COOKIES_FILE = 'cookies.local.json'
 DEFAULT_LOG_DIR = 'logs'
 # ==============================
@@ -167,11 +174,20 @@ def setup_run_logging(log_dir, query, started_at):
 
 
 class CookieAccountPool:
-    def __init__(self, accounts):
+    def __init__(self, accounts, metrics=None):
         if not accounts:
             raise ValueError('账号池不能为空')
         self.accounts = accounts
+        self.metrics = metrics
         self._condition = threading.Condition()
+
+    def active_capacity(self):
+        with self._condition:
+            return sum(
+                account.max_concurrency
+                for account in self.accounts
+                if account.status == 'active'
+            )
 
     def acquire(self):
         return self._acquire_matching(
@@ -192,25 +208,33 @@ class CookieAccountPool:
         )
 
     def _acquire_matching(self, predicate, exhausted_message):
-        with self._condition:
-            while True:
-                for account in self.accounts:
-                    if (
-                        account.status == 'active'
-                        and account.active_count < account.max_concurrency
-                        and predicate(account)
-                    ):
-                        account.active_count += 1
-                        return account
-                if any(account.status == 'active' and account.active_count > 0 and predicate(account) for account in self.accounts):
-                    self._condition.wait()
-                    continue
-                raise NoAvailableCookieAccounts(exhausted_message)
+        started_at = time.monotonic()
+        acquired = False
+        try:
+            with self._condition:
+                while True:
+                    for account in self.accounts:
+                        if (
+                            account.status == 'active'
+                            and account.active_count < account.max_concurrency
+                            and predicate(account)
+                        ):
+                            account.active_count += 1
+                            acquired = True
+                            return account
+                    if any(account.status == 'active' and account.active_count > 0 and predicate(account) for account in self.accounts):
+                        self._condition.wait()
+                        continue
+                    raise NoAvailableCookieAccounts(exhausted_message)
+        finally:
+            if self.metrics:
+                self.metrics.record_duration(
+                    'account.wait', time.monotonic() - started_at, success=acquired
+                )
 
     def report_success(self, account):
         with self._condition:
             account.active_count = max(0, account.active_count - 1)
-            self._persist_usage(account)
             self._condition.notify_all()
 
     def report_note_success(self, account, note_id):
@@ -264,10 +288,10 @@ class CookieAccountPool:
             os.replace(tmp_path, path)
 
 
-def ensure_cookie_pool(cookie_source):
+def ensure_cookie_pool(cookie_source, metrics=None):
     if isinstance(cookie_source, CookieAccountPool):
         return cookie_source
-    return CookieAccountPool([CookieAccount('default', cookie_source)])
+    return CookieAccountPool([CookieAccount('default', cookie_source)], metrics=metrics)
 
 
 def save_comments_to_xlsx(comments_data, file_path):
@@ -511,12 +535,15 @@ def collect_note_result(
     index, total, note, xhs_apis, cookie_source,
     max_comments_per_note, delay_seconds, base_path,
     download_media_flag=False, storage=None, keyword='', storage_lock=None,
+    storage_writer=None, metrics=None,
 ):
-    cookie_pool = ensure_cookie_pool(cookie_source)
+    cookie_pool = ensure_cookie_pool(cookie_source, metrics=metrics)
     storage_lock = storage_lock or threading.Lock()
     note_id = note['id']
     note_url = build_note_url(note)
 
+    if metrics:
+        metrics.increment('notes.started')
     logger.info(f'[{index+1}/{total}] 爬取图文笔记: {note_url}')
 
     while True:
@@ -530,6 +557,8 @@ def collect_note_result(
                 continue
             cookie_pool.report_success(account)
             logger.error(f'  笔记详情异常: {e}')
+            if metrics:
+                metrics.increment('notes.failed')
             return None
         if success and note_info:
             cookie_pool.report_note_success(account, note_id)
@@ -540,21 +569,29 @@ def collect_note_result(
             continue
         cookie_pool.report_success(account)
         logger.warning(f'  笔记详情获取失败: {msg}')
+        if metrics:
+            metrics.increment('notes.failed')
         return None
 
     items = (note_info.get('data') or {}).get('items') or []
     if not items:
         logger.warning(f'  笔记详情响应缺少 items，跳过: {note_id}')
+        if metrics:
+            metrics.increment('notes.skipped')
         return None
     raw_note = items[0]
     raw_note['url'] = note_url
     note_data = handle_note_info(raw_note)
     if note_data.get('note_type') != '图集':
         logger.info(f'  跳过非图文笔记: {note_id}')
+        if metrics:
+            metrics.increment('notes.skipped')
         return None
     note_title = note_data.get('title', '无标题')
     logger.info(f'  标题: {note_title[:50]}')
-    if storage:
+    if storage_writer:
+        storage_writer.submit_note(note_data, keyword=keyword, raw=raw_note)
+    elif storage:
         with storage_lock:
             storage.upsert_note(note_data, keyword=keyword, raw=raw_note)
     if download_media_flag:
@@ -566,7 +603,9 @@ def collect_note_result(
     logger.info(f'  开始采集评论，最多 {max_comments_per_note} 条...')
 
     cursor = note.get('_comments_next_cursor', '')
-    if storage:
+    if storage_writer:
+        collected_count = int(note.get('_comments_collected_count') or 0)
+    elif storage:
         with storage_lock:
             collected_count = storage.count_comments(note_id)
     else:
@@ -581,7 +620,11 @@ def collect_note_result(
         except StopCrawl as e:
             cookie_pool.report_failure(account, e)
             logger.warning(f'  账号 {account.name} 评论采集受限: {e}')
-            if storage:
+            if storage_writer:
+                storage_writer.submit_progress(
+                    note_id, 'partial', collected_count, max_comments_per_note, cursor, True
+                ).result()
+            elif storage:
                 with storage_lock:
                     storage.update_comment_progress(
                         note_id, 'partial', collected_count, max_comments_per_note, cursor, True
@@ -590,7 +633,11 @@ def collect_note_result(
         except Exception as e:
             cookie_pool.report_success(account)
             logger.error(f'  评论采集异常: {e}')
-            if storage:
+            if storage_writer:
+                storage_writer.submit_progress(
+                    note_id, 'partial', collected_count, max_comments_per_note, cursor, True
+                ).result()
+            elif storage:
                 with storage_lock:
                     storage.update_comment_progress(
                         note_id, 'partial', collected_count, max_comments_per_note, cursor, True
@@ -602,21 +649,34 @@ def collect_note_result(
         for comment in page_comments[:remaining]:
             comment_data = parse_comment(comment, note_id, note_title)
             comment_rows.append((comment_data, comment))
-            if storage:
+            if storage and not storage_writer:
                 with storage_lock:
                     storage.upsert_comment(comment_data, note_id, note_title, raw=comment)
         cookie_pool.report_comments_success(account, saved_comment_count)
 
-        if storage:
+        if storage_writer:
+            write_result = storage_writer.submit_comment_page(
+                note_id,
+                note_title,
+                comment_rows[-saved_comment_count:] if saved_comment_count else [],
+                max_comments_per_note,
+                next_cursor,
+                has_more,
+            ).result()
+            collected_count = write_result['collected_count']
+            is_done = write_result['is_done']
+        elif storage:
             with storage_lock:
                 collected_count = storage.count_comments(note_id)
+            is_done = collected_count >= max_comments_per_note or not has_more or not next_cursor
         else:
             collected_count += min(len(page_comments), remaining)
-
-        is_done = collected_count >= max_comments_per_note or not has_more or not next_cursor
-        status = 'done' if is_done else 'partial'
-        progress_cursor = next_cursor if has_more and next_cursor else ''
-        if storage:
+            is_done = collected_count >= max_comments_per_note or not has_more or not next_cursor
+        if metrics:
+            metrics.increment('comments.fetched', saved_comment_count)
+        if storage and not storage_writer:
+            status = 'done' if is_done else 'partial'
+            progress_cursor = next_cursor if has_more and next_cursor else ''
             with storage_lock:
                 storage.update_comment_progress(
                     note_id, status, collected_count, max_comments_per_note,
@@ -626,50 +686,85 @@ def collect_note_result(
             break
         cursor = next_cursor
         sleep_between_requests(delay_seconds)
-    if max_comments_per_note <= 0 and storage:
+    if max_comments_per_note <= 0 and storage_writer:
+        storage_writer.submit_progress(
+            note_id, 'done', collected_count, max_comments_per_note, '', False
+        ).result()
+    elif max_comments_per_note <= 0 and storage:
         with storage_lock:
             storage.update_comment_progress(note_id, 'done', collected_count, max_comments_per_note, '', False)
     logger.info(f'  采集到 {len(comment_rows)} 条一级评论')
 
     sleep_between_requests(delay_seconds)
 
+    if metrics:
+        metrics.increment('notes.completed')
     return {
         'note_data': note_data,
         'raw_note': raw_note,
         'comments': comment_rows,
-        'stored': bool(storage),
+        'stored': bool(storage or storage_writer),
     }
+
+
+def effective_note_concurrency(note_concurrency, cookie_pool):
+    capacity = cookie_pool.active_capacity()
+    return max(1, min(note_concurrency, capacity or 1))
 
 
 def collect_note_results(
     notes, xhs_apis, cookies_str, max_comments_per_note,
     delay_seconds, base_path, download_media_flag, note_concurrency,
     storage=None, keyword='', storage_lock=None,
+    storage_writer=None, metrics=None,
 ):
     total = len(notes)
-    cookie_pool = ensure_cookie_pool(cookies_str)
+    cookie_pool = ensure_cookie_pool(cookies_str, metrics=metrics)
     storage_lock = storage_lock or threading.Lock()
-    if note_concurrency <= 1:
+    worker_count = effective_note_concurrency(note_concurrency, cookie_pool)
+    if worker_count < note_concurrency:
+        logger.info(
+            f'笔记并发由账号容量约束: 请求 {note_concurrency}，实际 {worker_count}'
+        )
+    if metrics:
+        metrics.observe_max('scheduler.note_workers', worker_count)
+    if worker_count <= 1:
         for i, note in enumerate(notes):
             yield collect_note_result(
                 i, total, note, xhs_apis, cookie_pool,
                 max_comments_per_note, delay_seconds, base_path,
-                download_media_flag, storage, keyword, storage_lock
+                download_media_flag, storage, keyword, storage_lock,
+                storage_writer, metrics,
             )
         return
 
-    with ThreadPoolExecutor(max_workers=note_concurrency) as executor:
-        futures = [
-            executor.submit(
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        pending = set()
+        note_iter = iter(enumerate(notes))
+
+        def submit_next():
+            try:
+                i, note = next(note_iter)
+            except StopIteration:
+                return False
+            pending.add(executor.submit(
                 collect_note_result,
                 i, total, note, xhs_apis, cookie_pool,
                 max_comments_per_note, delay_seconds, base_path,
-                download_media_flag, storage, keyword, storage_lock
-            )
-            for i, note in enumerate(notes)
-        ]
-        for future in as_completed(futures):
-            yield future.result()
+                download_media_flag, storage, keyword, storage_lock,
+                storage_writer, metrics,
+            ))
+            return True
+
+        max_in_flight = worker_count * DEFAULT_TASK_PREFETCH_MULTIPLIER
+        for _ in range(min(max_in_flight, total)):
+            submit_next()
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.remove(future)
+                submit_next()
+                yield future.result()
 
 
 def collect_notes(
@@ -696,8 +791,15 @@ def build_parser():
     parser.add_argument('--require-num', type=int, default=DEFAULT_REQUIRE_NUM)
     parser.add_argument('--max-comments-per-note', type=int, default=DEFAULT_MAX_COMMENTS_PER_NOTE)
     parser.add_argument('--delay-seconds', type=float, default=DEFAULT_DELAY_SECONDS)
-    parser.add_argument('--note-concurrency', type=int, default=DEFAULT_NOTE_CONCURRENCY)
+    parser.add_argument('--note-concurrency', type=int, default=DEFAULT_NOTE_CONCURRENCY,
+                        help='笔记工作线程数；实际值不超过活跃账号并发容量')
     parser.add_argument('--account-concurrency', type=int, default=None, help='覆盖每个账号同时允许的并发槽数')
+    parser.add_argument('--sign-concurrency', type=int, default=DEFAULT_SIGN_CONCURRENCY,
+                        help='同时执行的 JS 签名任务数')
+    parser.add_argument('--db-batch-size', type=int, default=DEFAULT_DB_BATCH_SIZE,
+                        help='PostgreSQL 写入队列的最大批大小')
+    parser.add_argument('--db-flush-seconds', type=float, default=DEFAULT_DB_FLUSH_SECONDS,
+                        help='PostgreSQL 写入队列的最大等待秒数')
     parser.add_argument('--cookies-file', default='')
     parser.add_argument('--log-dir', default=DEFAULT_LOG_DIR)
     parser.add_argument('--sort-type-choice', type=int, default=0)
@@ -720,6 +822,12 @@ def validate_args(args):
         raise SystemExit('--note-concurrency 必须大于等于 1')
     if args.account_concurrency is not None and args.account_concurrency < 1:
         raise SystemExit('--account-concurrency 必须大于等于 1')
+    if args.sign_concurrency < 1:
+        raise SystemExit('--sign-concurrency 必须大于等于 1')
+    if args.db_batch_size < 1:
+        raise SystemExit('--db-batch-size 必须大于等于 1')
+    if args.db_flush_seconds <= 0:
+        raise SystemExit('--db-flush-seconds 必须大于 0')
     if not args.use_postgres and not args.save_excel and not args.dry_run:
         raise SystemExit(
             '当前命令不会保存任何数据。请添加 --use-postgres 保存到数据库，'
@@ -738,18 +846,24 @@ def main(argv=None):
     validate_args(args)
     started_at = datetime.now()
     log_file = setup_run_logging(args.log_dir, args.query, started_at)
+    metrics_file = str(Path(log_file).with_suffix('.metrics.json')) if log_file else ''
     cookies_str, base_path = init()
     args.cookies_file = resolve_cookies_file(args.cookies_file or None) or ''
     accounts = load_cookie_accounts(args.cookies_file or None, cookies_str)
     if args.account_concurrency is not None:
         for account in accounts:
             account.max_concurrency = args.account_concurrency
-    cookie_pool = CookieAccountPool(accounts)
-    xhs_apis = XHS_Apis()
+    metrics = CrawlMetrics()
+    cookie_pool = CookieAccountPool(accounts, metrics=metrics)
+    signer = SigningExecutor(args.sign_concurrency, metrics=metrics)
+    xhs_apis = XHS_Apis(metrics=metrics, signer=signer)
     storage = None
+    storage_writer = None
     task_id = None
     note_count = 0
     comment_count = 0
+    run_status = 'running'
+    run_error = None
 
     # ========== 搜索配置 ==========
     query = args.query
@@ -776,9 +890,44 @@ def main(argv=None):
     if args.save_excel:
         logger.info(f'本次 Excel 将保存到: {task_excel_dir}')
     if args.use_postgres:
-        storage = PostgresStorage()
-        storage.init_schema()
-        task_id = storage.start_task(query, vars(args))
+        try:
+            storage = PostgresStorage()
+            storage.init_schema()
+            task_id = storage.start_task(query, vars(args))
+            storage_writer = StorageWriter(
+                storage.dsn,
+                batch_size=args.db_batch_size,
+                flush_seconds=args.db_flush_seconds,
+                metrics=metrics,
+            )
+            storage_writer.start()
+        except Exception as startup_error:
+            run_status = 'failed'
+            run_error = str(startup_error)
+            if storage and task_id:
+                try:
+                    storage.finish_task(task_id, 'failed', 0, 0, str(startup_error))
+                except Exception:
+                    pass
+            if storage_writer:
+                try:
+                    storage_writer.close()
+                except Exception:
+                    pass
+            if storage:
+                storage.close()
+            xhs_apis.close()
+            signer.close()
+            metrics.log_summary(logger)
+            if metrics_file:
+                metrics.write_json(metrics_file, {
+                    'query': query,
+                    'started_at': started_at.isoformat(),
+                    'finished_at': datetime.now().isoformat(),
+                    'status': run_status,
+                    'error': run_error,
+                })
+            raise
 
     try:
         # 1. 搜索图文笔记
@@ -804,7 +953,8 @@ def main(argv=None):
         results = collect_note_results(
             notes, xhs_apis, cookie_pool, max_comments_per_note,
             args.delay_seconds, base_path, args.download_media,
-            args.note_concurrency, storage, query
+            args.note_concurrency, storage, query,
+            storage_writer=storage_writer, metrics=metrics,
         )
         for result in results:
             if not result:
@@ -841,8 +991,11 @@ def main(argv=None):
                 logger.info(f'评论 Excel 已保存: {comments_excel_path}')
                 logger.info(f'共采集 {len(all_comments)} 条一级评论')
 
+        if storage_writer:
+            storage_writer.flush()
         if storage:
             storage.finish_task(task_id, 'done', note_count, comment_count)
+        run_status = 'done'
 
         # 4. 统计
         logger.info('=' * 50)
@@ -851,11 +1004,45 @@ def main(argv=None):
         logger.info(f'  一级评论: {comment_count}')
         logger.info('=' * 50)
     except Exception as e:
+        run_status = 'failed'
+        run_error = str(e)
+        if storage_writer:
+            try:
+                storage_writer.flush()
+            except Exception as flush_error:
+                logger.error(f'数据库写入队列清空失败: {flush_error}')
         if storage and task_id:
             storage.finish_task(task_id, 'failed', note_count, comment_count, str(e))
         logger.error(str(e))
         raise
     finally:
+        if storage_writer:
+            try:
+                storage_writer.close()
+            except Exception as writer_error:
+                logger.error(f'数据库写入器关闭失败: {writer_error}')
+        xhs_apis.close()
+        signer.close()
+        metrics.log_summary(logger)
+        if metrics_file:
+            try:
+                metrics_path = metrics.write_json(metrics_file, {
+                    'query': query,
+                    'started_at': started_at.isoformat(),
+                    'finished_at': datetime.now().isoformat(),
+                    'status': run_status,
+                    'error': run_error,
+                    'note_count': note_count,
+                    'comment_count': comment_count,
+                    'requested_note_concurrency': args.note_concurrency,
+                    'active_account_capacity': cookie_pool.active_capacity(),
+                    'sign_concurrency': args.sign_concurrency,
+                    'db_batch_size': args.db_batch_size,
+                    'db_flush_seconds': args.db_flush_seconds,
+                })
+                logger.info(f'结构化性能记录: {metrics_path}')
+            except Exception as metrics_error:
+                logger.error(f'结构化性能记录写入失败: {metrics_error}')
         if storage:
             storage.close()
 

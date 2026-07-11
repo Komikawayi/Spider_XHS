@@ -1,0 +1,42 @@
+{
+  "elapsed_seconds": 0.795749,
+  "counters": {
+    "account.wait.success": 1,
+    "signing.success": 2,
+    "http.sessions_created": 1,
+    "http.api.sns.web.v1.search.notes.success": 1,
+    "account.wait.failure": 1
+  },
+  "timings": {
+    "account.wait": {
+      "count": 2,
+      "total_seconds": 2.4e-05,
+      "average_seconds": 1.2e-05
+    },
+    "signing": {
+      "count": 2,
+      "total_seconds": 0.443414,
+      "average_seconds": 0.221707
+    },
+    "http.api.sns.web.v1.search.notes": {
+      "count": 1,
+      "total_seconds": 0.344513,
+      "average_seconds": 0.344513
+    }
+  },
+  "max_values": {},
+  "metadata": {
+    "query": "植村秀",
+    "started_at": "2026-07-11T11:16:50.844489",
+    "finished_at": "2026-07-11T11:16:51.663706",
+    "status": "failed",
+    "error": "没有可用账号：所有 Cookie 均已过期或进入冷却",
+    "note_count": 0,
+    "comment_count": 0,
+    "requested_note_concurrency": 10,
+    "active_account_capacity": 0,
+    "sign_concurrency": 4,
+    "db_batch_size": 100,
+    "db_flush_seconds": 0.05
+  }
+}

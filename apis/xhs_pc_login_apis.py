@@ -150,12 +150,13 @@ class XHSLoginApi:
             cookies[key] = value
 
         res = resp.json()
-        status = (res.get('data') or {}).get('codeStatus')
+        data = res.get('data') or {}
+        if not isinstance(data, dict):
+            return False, res.get('msg', '二维码状态响应 data 格式异常'), cookies
+        self._apply_qrcode_login_info(cookies, data)
+        status = data.get('codeStatus')
         if status is None:
             return False, res.get('msg', '二维码状态响应缺少 codeStatus'), cookies
-
-        if status == 2:
-            cookies = self._login_by_qrcode_status(qr_id, code, cookies)
 
         status_map = {
             0: (False, '请扫描二维码'),
@@ -166,12 +167,27 @@ class XHSLoginApi:
         success, msg = status_map.get(status, (False, f'未知状态: {status}'))
         return success, msg, cookies
 
+    @staticmethod
+    def _apply_qrcode_login_info(cookies, data):
+        if not isinstance(data, dict):
+            return False
+        login_info = data.get('login_info') or data.get('loginInfo') or {}
+        for candidate in (login_info, data):
+            if not isinstance(candidate, dict):
+                continue
+            for key in ('web_session', 'webSession', 'session'):
+                if candidate.get(key):
+                    cookies['web_session'] = candidate[key]
+                    return True
+        return False
+
     def _login_by_qrcode_status(self, qr_id, code, cookies):
         api = '/api/sns/web/v1/login/qrcode/status'
         params = {"qr_id": qr_id, "code": code}
         splice_api = splice_str(api, params)
 
         headers, _ = generate_headers(cookies['a1'], splice_api, method='GET')
+        headers['x-login-mode'] = ''
         resp = requests.get(
             self.base_url + splice_api,
             headers=headers, cookies=cookies,
@@ -181,11 +197,26 @@ class XHSLoginApi:
             cookies[key] = value
 
         res = resp.json()
-        if res.get('success') and 'login_info' in res.get('data', {}):
-            login_info = res['data']['login_info']
-            if 'session' in login_info and 'web_session' not in cookies:
-                cookies['web_session'] = login_info['session']
+        data = res.get('data') or {}
+        has_session = self._apply_qrcode_login_info(cookies, data)
+        if not has_session and not cookies.get('web_session'):
+            login_info = data.get('login_info') or data.get('loginInfo') or {}
+            logger.warning(
+                '二维码登录状态尚未返回会话: '
+                f'success={res.get("success")}, code={res.get("code")}, '
+                f'msg={res.get("msg")}, data_keys={sorted(data.keys()) if isinstance(data, dict) else []}, '
+                f'login_info_keys={sorted(login_info.keys()) if isinstance(login_info, dict) else []}, '
+                f'set_cookie_keys={sorted(resp.cookies.keys())}'
+            )
+        return cookies
 
+    def _wait_for_qrcode_session(self, qr_id, code, cookies, retries=16, retry_seconds=2):
+        for attempt in range(retries):
+            cookies = self._login_by_qrcode_status(qr_id, code, cookies)
+            if cookies.get('web_session'):
+                return cookies
+            if attempt < retries - 1:
+                time.sleep(retry_seconds)
         return cookies
 
     def get_user_info(self, cookies):
@@ -280,7 +311,7 @@ class XHSLoginApi:
     def qrcode_login(self, show_in_terminal=True):
         logger.info('[1/4] 正在生成初始cookies...')
         cookies = self.generate_init_cookies()
-        logger.info(f'{cookies}')
+        logger.info(f'初始 Cookie 已生成，字段: {", ".join(cookies.keys())}')
 
         logger.info('[2/4] 正在获取二维码...')
         success, msg, qr_data = self.generate_qrcode(cookies)
@@ -309,6 +340,11 @@ class XHSLoginApi:
             time.sleep(2)
 
         logger.info('[4/4] 验证登录状态...')
+        if not cookies.get('web_session'):
+            cookies = self._wait_for_qrcode_session(qr_data['qr_id'], qr_data['code'], cookies)
+        if not cookies.get('web_session'):
+            logger.error('二维码已确认，但未获得 web_session；请重新扫码登录')
+            return None
         success, user_info, cookies = self.get_user_info(cookies)
         if success:
             logger.info(f'用户: {user_info.get("nickname", "未知")} (RedID: {user_info.get("red_id", "未知")})')
@@ -316,7 +352,7 @@ class XHSLoginApi:
             logger.warning('获取用户信息失败，但cookies可能仍有效')
 
         cookies_str = self.cookies_to_str(cookies)
-        logger.success(f'登录成功!\ncookies:\n{cookies_str}')
+        logger.success('登录成功，Cookie 已生成并等待安全保存')
         return cookies_str
 
     def phone_login(self):

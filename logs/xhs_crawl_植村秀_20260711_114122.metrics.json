@@ -1,0 +1,49 @@
+{
+  "elapsed_seconds": 2.347875,
+  "counters": {
+    "account.wait.success": 9,
+    "signing.success": 18,
+    "http.sessions_created": 1,
+    "http.api.sns.web.v1.search.notes.success": 1,
+    "notes.started": 8,
+    "http.api.sns.web.v1.feed.success": 8,
+    "notes.completed": 8
+  },
+  "timings": {
+    "account.wait": {
+      "count": 9,
+      "total_seconds": 3.8e-05,
+      "average_seconds": 4e-06
+    },
+    "signing": {
+      "count": 18,
+      "total_seconds": 7.169275,
+      "average_seconds": 0.398293
+    },
+    "http.api.sns.web.v1.search.notes": {
+      "count": 1,
+      "total_seconds": 0.865688,
+      "average_seconds": 0.865688
+    },
+    "http.api.sns.web.v1.feed": {
+      "count": 8,
+      "total_seconds": 0.974377,
+      "average_seconds": 0.121797
+    }
+  },
+  "max_values": {
+    "scheduler.async_note_workers": 10.0
+  },
+  "metadata": {
+    "query": "植村秀",
+    "started_at": "2026-07-11T11:41:22.320180",
+    "finished_at": "2026-07-11T11:41:24.690043",
+    "status": "done",
+    "error": null,
+    "note_count": 8,
+    "comment_count": 0,
+    "requested_note_concurrency": 10,
+    "active_account_capacity": 10,
+    "sign_concurrency": 4
+  }
+}

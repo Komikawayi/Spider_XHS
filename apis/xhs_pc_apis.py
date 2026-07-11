@@ -1,8 +1,11 @@
 # encoding: utf-8
 import json
 import re
+import threading
+import time
 import urllib
 import requests
+from requests.adapters import HTTPAdapter
 from xhs_utils.xhs_util import splice_str, generate_request_params, generate_x_b3_traceid, generate_search_id, generate_search_request_id, generate_x_rap_param, get_common_headers
 from xhs_utils.http_util import REQUEST_TIMEOUT
 from loguru import logger
@@ -30,8 +33,70 @@ def _get_query_params(parsed_url):
 
 
 class XHS_Apis():
-    def __init__(self):
+    def __init__(self, metrics=None, signer=None, session_factory=None):
         self.base_url = "https://edith.xiaohongshu.com"
+        self._metrics = metrics
+        self._signer = signer
+        self._session_factory = session_factory or requests.Session
+        self._thread_local = threading.local()
+        self._sessions = []
+        self._sessions_lock = threading.Lock()
+
+    def _get_session(self):
+        session = getattr(self._thread_local, "session", None)
+        if session is not None:
+            return session
+        session = self._session_factory()
+        if hasattr(session, "mount"):
+            adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+        self._thread_local.session = session
+        with self._sessions_lock:
+            self._sessions.append(session)
+        if self._metrics:
+            self._metrics.increment("http.sessions_created")
+        return session
+
+    def _request(self, method, url, operation, **kwargs):
+        session = self._get_session()
+        # 连接可复用，但账号 Cookie 必须严格由本次请求显式提供，不能跨账号残留。
+        if hasattr(session, "cookies"):
+            session.cookies.clear()
+        started_at = time.monotonic()
+        metric_name = "http." + operation.strip("/").replace("/", ".")
+        try:
+            response = session.request(method, url, **kwargs)
+        except Exception:
+            if self._metrics:
+                self._metrics.record_duration(
+                    metric_name, time.monotonic() - started_at, success=False
+                )
+            raise
+        if self._metrics:
+            self._metrics.record_duration(
+                metric_name,
+                time.monotonic() - started_at,
+                success=getattr(response, "ok", True),
+            )
+        return response
+
+    def _generate_request_params(self, cookies_str, api, data="", method="POST"):
+        if self._signer:
+            return self._signer.generate_request_params(cookies_str, api, data, method)
+        return generate_request_params(cookies_str, api, data, method)
+
+    def _generate_x_rap_param(self, api, data, app_id=None):
+        if self._signer:
+            return self._signer.generate_x_rap_param(api, data, app_id)
+        return generate_x_rap_param(api, data, app_id)
+
+    def close(self):
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions.clear()
+        for session in sessions:
+            session.close()
 
     def get_homefeed_all_channel(self, cookies_str: str, proxies: dict = None):
         """
@@ -394,10 +459,13 @@ class XHS_Apis():
                 "xsec_source": kvDist['xsec_source'] if 'xsec_source' in kvDist else "pc_search",
                 "xsec_token": kvDist.get('xsec_token', '')
             }
-            headers, cookies, data = generate_request_params(cookies_str, api, data, 'POST')
-            headers["x-rap-param"] = generate_x_rap_param(api, data)
+            headers, cookies, data = self._generate_request_params(cookies_str, api, data, 'POST')
+            headers["x-rap-param"] = self._generate_x_rap_param(api, data)
             headers["xy-direction"] = "13"
-            response = requests.post(self.base_url + api, headers=headers, data=data, cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT)
+            response = self._request(
+                "POST", self.base_url + api, api,
+                headers=headers, data=data, cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT,
+            )
             res_json = response.json()
             success, msg = _get_success_msg(res_json)
         except Exception as e:
@@ -527,9 +595,12 @@ class XHS_Apis():
                     "avif"
                 ]
             }
-            headers, cookies, data = generate_request_params(cookies_str, api, data, 'POST')
-            headers["x-rap-param"] = generate_x_rap_param(api, data)
-            response = requests.post(self.base_url + api, headers=headers, data=data.encode('utf-8'), cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT)
+            headers, cookies, data = self._generate_request_params(cookies_str, api, data, 'POST')
+            headers["x-rap-param"] = self._generate_x_rap_param(api, data)
+            response = self._request(
+                "POST", self.base_url + api, api,
+                headers=headers, data=data.encode('utf-8'), cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT,
+            )
             res_json = response.json()
             success, msg = _get_success_msg(res_json)
         except Exception as e:
@@ -652,8 +723,11 @@ class XHS_Apis():
                 "xsec_token": xsec_token
             }
             splice_api = splice_str(api, params)
-            headers, cookies, data = generate_request_params(cookies_str, splice_api, '', 'GET')
-            response = requests.get(self.base_url + splice_api, headers=headers, cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT)
+            headers, cookies, data = self._generate_request_params(cookies_str, splice_api, '', 'GET')
+            response = self._request(
+                "GET", self.base_url + splice_api, api,
+                headers=headers, cookies=cookies, proxies=proxies, timeout=REQUEST_TIMEOUT,
+            )
             res_json = response.json()
             success, msg = _get_success_msg(res_json)
         except Exception as e:
