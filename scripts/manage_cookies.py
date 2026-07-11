@@ -23,6 +23,7 @@ from xhs_utils.cookie_util import trans_cookies
 DEFAULT_OUTPUT = "cookies.local.json"
 DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT = 150
 DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT = 2500
+DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT = 2
 
 
 def load_cookie_records(path):
@@ -61,6 +62,7 @@ def build_cookie_record(name, cookies_str, login_api):
         "login_at": datetime.now().isoformat(timespec="seconds"),
         "daily_note_limit": DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT,
         "daily_comment_limit": DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT,
+        "max_concurrency": DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT,
         "usage_date": datetime.now().date().isoformat(),
         "note_ids_today": [],
         "comments_today": 0,

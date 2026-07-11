@@ -43,6 +43,17 @@ class AlwaysEmptySearchApi:
         return True, "成功", []
 
 
+class EmptyForFirstCookieSearchApi:
+    def __init__(self):
+        self.cookies_seen = []
+
+    def search_some_note(self, query, require_num, cookies_str, sort_type_choice, note_type, note_time, note_range):
+        self.cookies_seen.append(cookies_str)
+        if cookies_str == "cookie-1":
+            return True, "成功", []
+        return True, "成功", [{"id": "n2", "model_type": "note", "note_card": {"type": "normal"}}]
+
+
 class SlowNoteApi:
     def __init__(self):
         self.active = 0
@@ -193,6 +204,7 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
     def test_should_stop_for_message_detects_risk_or_login_messages(self):
         self.assertTrue(hz.should_stop_for_message("登录已过期"))
         self.assertTrue(hz.should_stop_for_message("请求过于频繁"))
+        self.assertTrue(hz.should_stop_for_message("请完成验证码"))
         self.assertFalse(hz.should_stop_for_message("成功"))
 
     def test_collect_comments_limited_raises_stop_crawl_on_login_expired(self):
@@ -253,6 +265,21 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
             hz.search_notes_with_retry(
                 AlwaysEmptySearchApi(), "植村秀", 20, "cookie", 0, 2, 0, 0, retries=1, retry_delay_seconds=0
             )
+
+    def test_search_cookie_pool_falls_back_when_account_returns_empty_results(self):
+        api = EmptyForFirstCookieSearchApi()
+        first = hz.CookieAccount("a1", "cookie-1")
+        second = hz.CookieAccount("a2", "cookie-2")
+        pool = hz.CookieAccountPool([first, second])
+
+        success, msg, notes = hz.search_notes_with_cookie_pool(api, "植村秀", 20, pool, 0, 2, 0, 0)
+
+        self.assertTrue(success)
+        self.assertEqual([note["id"] for note in notes], ["n2"])
+        self.assertIn("cookie-1", api.cookies_seen)
+        self.assertIn("cookie-2", api.cookies_seen)
+        self.assertEqual(first.status, "cooling")
+        self.assertEqual(second.status, "active")
 
     def test_collect_note_results_yields_finished_notes_incrementally(self):
         api = VariableSpeedNoteApi()
@@ -343,6 +370,7 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
                     "cookies": "cookie-1",
                     "daily_note_limit": 2,
                     "daily_comment_limit": 5,
+                    "max_concurrency": 2,
                     "usage_date": today,
                     "note_ids_today": ["n1"],
                     "comments_today": 3,
@@ -360,6 +388,7 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
 
         self.assertEqual(accounts[0].daily_note_limit, 2)
         self.assertEqual(accounts[0].daily_comment_limit, 5)
+        self.assertEqual(accounts[0].max_concurrency, 2)
         self.assertEqual(accounts[0].note_ids_today, {"n1"})
         self.assertEqual(accounts[0].comments_today, 3)
         self.assertEqual(accounts[1].usage_date, today)
@@ -372,6 +401,20 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
         self.assertEqual(len(accounts), 1)
         self.assertEqual(accounts[0].name, "default")
         self.assertEqual(accounts[0].cookies, "single-cookie")
+
+    def test_resolve_cookies_file_prefers_local_cookie_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / hz.DEFAULT_COOKIES_FILE
+            path.write_text("[]", encoding="utf-8")
+
+            resolved = hz.resolve_cookies_file(cwd=tmp)
+
+        self.assertEqual(resolved, str(path))
+
+    def test_resolve_cookies_file_keeps_explicit_path(self):
+        resolved = hz.resolve_cookies_file("custom.cookies.json", cwd="missing")
+
+        self.assertEqual(resolved, "custom.cookies.json")
 
     def test_cookie_pool_marks_expired_and_cooling_accounts_unavailable(self):
         pool = hz.CookieAccountPool([
@@ -413,6 +456,21 @@ class HangzhouEcommerceScriptTests(unittest.TestCase):
         pool.report_note_success(second, "n1")
 
         self.assertEqual(account.note_ids_today, {"n1"})
+
+    def test_cookie_pool_allows_two_parallel_slots_per_account(self):
+        account = hz.CookieAccount("a1", "cookie-1", max_concurrency=2)
+        pool = hz.CookieAccountPool([account])
+
+        first = pool.acquire_for_note("n1")
+        second = pool.acquire_for_note("n2")
+
+        self.assertIs(first, account)
+        self.assertIs(second, account)
+        self.assertEqual(account.active_count, 2)
+        pool.report_note_success(first, "n1")
+        self.assertEqual(account.active_count, 1)
+        pool.report_note_success(second, "n2")
+        self.assertEqual(account.active_count, 0)
 
     def test_cookie_pool_skips_accounts_that_reach_daily_comment_limit(self):
         pool = hz.CookieAccountPool([

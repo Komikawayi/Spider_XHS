@@ -32,21 +32,28 @@ DEFAULT_QUERY = '植村秀'
 DEFAULT_REQUIRE_NUM = 1000
 DEFAULT_MAX_COMMENTS_PER_NOTE = 500
 DEFAULT_DELAY_SECONDS = 1
-DEFAULT_NOTE_CONCURRENCY = 4
+DEFAULT_NOTE_CONCURRENCY = 8
 DEFAULT_SEARCH_EMPTY_RETRIES = 2
 DEFAULT_SAVE_EXCEL = True
 DEFAULT_USE_POSTGRES = True
 DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT = 150
 DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT = 2500
+DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT = 2
+DEFAULT_COOKIES_FILE = 'cookies.local.json'
+DEFAULT_LOG_DIR = 'logs'
 # ==============================
 
 
-STOP_SIGNAL_WORDS = ('登录', '验证', '频繁', '风险', '风控', '限制', '过期', '无权限')
+STOP_SIGNAL_WORDS = ('登录', '验证', '验证码', '频繁', '风险', '风控', '限制', '过期', '无权限')
 EXPIRED_SIGNAL_WORDS = ('登录', '过期', '无权限')
-COOLING_SIGNAL_WORDS = ('验证', '频繁', '风险', '风控', '限制')
+COOLING_SIGNAL_WORDS = ('验证', '验证码', '频繁', '风险', '风控', '限制')
 
 
 class StopCrawl(RuntimeError):
+    pass
+
+
+class SearchEmptyResult(RuntimeError):
     pass
 
 
@@ -59,7 +66,8 @@ class CookieAccount:
     name: str
     cookies: str
     status: str = 'active'
-    in_use: bool = False
+    active_count: int = 0
+    max_concurrency: int = DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT
     daily_note_limit: int = DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT
     daily_comment_limit: int = DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT
     usage_date: str = ''
@@ -77,6 +85,7 @@ def normalize_usage_fields(record):
     normalized = dict(record)
     normalized.setdefault('daily_note_limit', DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT)
     normalized.setdefault('daily_comment_limit', DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT)
+    normalized.setdefault('max_concurrency', DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT)
     if normalized.get('usage_date') != today:
         normalized['usage_date'] = today
         normalized['note_ids_today'] = []
@@ -95,6 +104,7 @@ def cookie_account_from_record(record, index, source_path=''):
         status=item.get('status', 'active'),
         daily_note_limit=int(item.get('daily_note_limit') or DEFAULT_DAILY_NOTE_LIMIT_PER_ACCOUNT),
         daily_comment_limit=int(item.get('daily_comment_limit') or DEFAULT_DAILY_COMMENT_LIMIT_PER_ACCOUNT),
+        max_concurrency=max(1, int(item.get('max_concurrency') or DEFAULT_ACCOUNT_CONCURRENCY_PER_ACCOUNT)),
         usage_date=item.get('usage_date') or today_usage_date(),
         note_ids_today=set(item.get('note_ids_today') or []),
         comments_today=int(item.get('comments_today') or 0),
@@ -137,6 +147,25 @@ def load_cookie_accounts(cookies_file=None, fallback_cookie=None):
     raise ValueError('未找到可用 Cookie。请配置 .env COOKIES 或传入 --cookies-file')
 
 
+def resolve_cookies_file(cookies_file='', cwd=None):
+    if cookies_file:
+        return cookies_file
+    local_path = Path(cwd or os.getcwd()) / DEFAULT_COOKIES_FILE
+    if local_path.exists():
+        return str(local_path)
+    return None
+
+
+def setup_run_logging(log_dir, query, started_at):
+    if not log_dir:
+        return ''
+    safe_query = ''.join(ch for ch in query if ch not in r'\/:*?"<>| ').strip() or 'xhs'
+    path = Path(log_dir) / f'xhs_crawl_{safe_query}_{started_at.strftime("%Y%m%d_%H%M%S")}.log'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logger.add(str(path), encoding='utf-8', enqueue=True, rotation='20 MB', backtrace=True, diagnose=False)
+    return str(path)
+
+
 class CookieAccountPool:
     def __init__(self, accounts):
         if not accounts:
@@ -166,31 +195,35 @@ class CookieAccountPool:
         with self._condition:
             while True:
                 for account in self.accounts:
-                    if account.status == 'active' and not account.in_use and predicate(account):
-                        account.in_use = True
+                    if (
+                        account.status == 'active'
+                        and account.active_count < account.max_concurrency
+                        and predicate(account)
+                    ):
+                        account.active_count += 1
                         return account
-                if any(account.status == 'active' and account.in_use and predicate(account) for account in self.accounts):
+                if any(account.status == 'active' and account.active_count > 0 and predicate(account) for account in self.accounts):
                     self._condition.wait()
                     continue
                 raise NoAvailableCookieAccounts(exhausted_message)
 
     def report_success(self, account):
         with self._condition:
-            account.in_use = False
+            account.active_count = max(0, account.active_count - 1)
             self._persist_usage(account)
             self._condition.notify_all()
 
     def report_note_success(self, account, note_id):
         with self._condition:
             account.note_ids_today.add(note_id)
-            account.in_use = False
+            account.active_count = max(0, account.active_count - 1)
             self._persist_usage(account)
             self._condition.notify_all()
 
     def report_comments_success(self, account, comment_count):
         with self._condition:
             account.comments_today += max(0, int(comment_count or 0))
-            account.in_use = False
+            account.active_count = max(0, account.active_count - 1)
             self._persist_usage(account)
             self._condition.notify_all()
 
@@ -198,7 +231,7 @@ class CookieAccountPool:
         status = classify_account_failure(message) or 'cooling'
         with self._condition:
             account.status = status
-            account.in_use = False
+            account.active_count = max(0, account.active_count - 1)
             self._persist_usage(account)
             self._condition.notify_all()
 
@@ -219,6 +252,7 @@ class CookieAccountPool:
                 item['status'] = account.status
                 item['daily_note_limit'] = account.daily_note_limit
                 item['daily_comment_limit'] = account.daily_comment_limit
+                item['max_concurrency'] = account.max_concurrency
                 item['usage_date'] = account.usage_date or today_usage_date()
                 item['note_ids_today'] = sorted(account.note_ids_today)
                 item['comments_today'] = account.comments_today
@@ -437,7 +471,7 @@ def search_notes_with_retry(
         if attempt < retries:
             logger.warning(f'搜索返回空结果，{retry_delay_seconds} 秒后重试 ({attempt + 1}/{retries})')
             sleep_between_requests(retry_delay_seconds)
-    raise RuntimeError(f'搜索连续返回空结果：{query}。建议稍后重试，或降低 DEFAULT_REQUIRE_NUM。最后消息: {last_msg}')
+    raise SearchEmptyResult(f'搜索连续返回空结果：{query}。建议换账号或稍后重试。最后消息: {last_msg}')
 
 
 def search_notes_with_cookie_pool(
@@ -454,6 +488,10 @@ def search_notes_with_cookie_pool(
         except StopCrawl as e:
             cookie_pool.report_failure(account, e)
             logger.warning(f'搜索账号 {account.name} 不可用: {e}')
+            continue
+        except SearchEmptyResult as e:
+            cookie_pool.report_failure(account, e)
+            logger.warning(f'搜索账号 {account.name} 连续空结果，换下一个账号: {e}')
             continue
         except Exception:
             cookie_pool.report_success(account)
@@ -659,7 +697,9 @@ def build_parser():
     parser.add_argument('--max-comments-per-note', type=int, default=DEFAULT_MAX_COMMENTS_PER_NOTE)
     parser.add_argument('--delay-seconds', type=float, default=DEFAULT_DELAY_SECONDS)
     parser.add_argument('--note-concurrency', type=int, default=DEFAULT_NOTE_CONCURRENCY)
+    parser.add_argument('--account-concurrency', type=int, default=None, help='覆盖每个账号同时允许的并发槽数')
     parser.add_argument('--cookies-file', default='')
+    parser.add_argument('--log-dir', default=DEFAULT_LOG_DIR)
     parser.add_argument('--sort-type-choice', type=int, default=0)
     parser.add_argument('--note-time', type=int, default=0)
     parser.add_argument('--note-range', type=int, default=0)
@@ -678,6 +718,8 @@ def validate_args(args):
         args.save_excel = False
     if args.note_concurrency < 1:
         raise SystemExit('--note-concurrency 必须大于等于 1')
+    if args.account_concurrency is not None and args.account_concurrency < 1:
+        raise SystemExit('--account-concurrency 必须大于等于 1')
     if not args.use_postgres and not args.save_excel and not args.dry_run:
         raise SystemExit(
             '当前命令不会保存任何数据。请添加 --use-postgres 保存到数据库，'
@@ -694,8 +736,15 @@ def build_task_output_dir(base_path, query, started_at):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     validate_args(args)
+    started_at = datetime.now()
+    log_file = setup_run_logging(args.log_dir, args.query, started_at)
     cookies_str, base_path = init()
-    cookie_pool = CookieAccountPool(load_cookie_accounts(args.cookies_file or None, cookies_str))
+    args.cookies_file = resolve_cookies_file(args.cookies_file or None) or ''
+    accounts = load_cookie_accounts(args.cookies_file or None, cookies_str)
+    if args.account_concurrency is not None:
+        for account in accounts:
+            account.max_concurrency = args.account_concurrency
+    cookie_pool = CookieAccountPool(accounts)
     xhs_apis = XHS_Apis()
     storage = None
     task_id = None
@@ -712,9 +761,17 @@ def main(argv=None):
     note_range = args.note_range
     # ==============================
 
-    started_at = datetime.now()
     task_excel_dir = build_task_output_dir(base_path, query, started_at)
 
+    if log_file:
+        logger.info(f'实时日志文件: {log_file}')
+    if args.cookies_file:
+        logger.info(
+            f'使用 Cookie 文件: {args.cookies_file}，可用账号: '
+            f'{", ".join(f"{account.name}(并发{account.max_concurrency})" for account in accounts)}'
+        )
+    else:
+        logger.info('使用 .env COOKIES 单账号模式')
     logger.info(f'开始搜索: "{query}", 目标笔记数: {require_num}')
     if args.save_excel:
         logger.info(f'本次 Excel 将保存到: {task_excel_dir}')

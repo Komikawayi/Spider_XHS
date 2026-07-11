@@ -5,6 +5,7 @@
     "status": "active",
     "daily_note_limit": 150,
     "daily_comment_limit": 2500,
+    "max_concurrency": 2,
     "usage_date": "2026-07-07",
     "note_ids_today": [],
     "comments_today": 0
@@ -15,6 +16,7 @@
     "status": "active",
     "daily_note_limit": 150,
     "daily_comment_limit": 2500,
+    "max_concurrency": 2,
     "usage_date": "2026-07-07",
     "note_ids_today": [],
     "comments_today": 0

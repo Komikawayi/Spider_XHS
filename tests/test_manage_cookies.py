@@ -48,6 +48,7 @@ class ManageCookiesTests(unittest.TestCase):
         self.assertEqual(saved[1]["status"], "active")
         self.assertEqual(saved[1]["daily_note_limit"], 150)
         self.assertEqual(saved[1]["daily_comment_limit"], 2500)
+        self.assertEqual(saved[1]["max_concurrency"], 2)
         self.assertEqual(saved[1]["note_ids_today"], [])
         self.assertEqual(saved[1]["comments_today"], 0)
         self.assertEqual(saved[1]["nickname"], "nick")
